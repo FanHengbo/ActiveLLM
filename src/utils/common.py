@@ -4,6 +4,7 @@ import torch
 import hashlib
 from types import MethodType
 from typing import List, Literal, Optional, Tuple
+import random
 
 import transformers
 from transformers import (
@@ -437,11 +438,9 @@ def prepare_data(
 
     if len(data_args.dataset_list) == 1:
         all_datasets = all_datasets[0]
-        
-    else:
-        all_datasets = concatenate_datasets(all_datasets)
 
-    return all_datasets
+    training_set, dev_set = all_datasets
+    return training_set, dev_set
 
 
 def preprocess_data(
@@ -471,6 +470,47 @@ def preprocess_data(
                     prompt = query
                 prompt = prefix + prompt
                 yield prompt, answer
+    
+    def format_example_squad_question_generation(examples):
+        for i in range(len(examples["prompt"])):
+            context, question, answer = examples["prompt"][i], examples["query"][i], examples["response"][i]
+            yield context, question, answer["text"]
+    
+    def format_example_squad_keywords_indentification(examples):
+        '''
+        For task Keywords Indentification, we only need distinct context passage of original squad dataset
+        '''
+        context = examples["prompt"]
+        distinct_group = set(context)
+        distinct_group = list(distinct_group)
+        for group in distinct_group:
+            yield group
+
+    def preprocess_squad_dataset(examples):
+        '''
+        1st task: Keywords Indentification
+                  Randomly maskout some tokens in context and then ask the model to re-comlete the whole passage
+        2nd task: Question Generation
+                  Ask the model to generate questions based on answers
+        '''
+        model_inputs = {"input_ids": [], "labels": []}
+        for context, question, answer in format_example_squad_question_generation(examples):
+            source_ids = tokenizer.encode(text=context+" "+answer, add_special_tokens=False)
+            target_ids = tokenizer.encode(text=question, add_special_tokens=False)
+
+            if len(source_ids) > data_args.max_source_length - 2: # gmask and bos tokens
+                source_ids = source_ids[:data_args.max_source_length - 2]
+            if len(target_ids) > data_args.max_target_length - 1: # eos token
+                target_ids = target_ids[:data_args.max_target_length - 1]
+
+            input_ids = tokenizer.build_inputs_with_special_tokens(source_ids, target_ids)
+
+            context_length = input_ids.index(tokenizer.bos_token_id) + 1
+            labels = [IGNORE_INDEX] * context_length + input_ids[context_length:]
+
+            model_inputs["input_ids"].append(input_ids)
+            model_inputs["labels"].append(labels)
+        return model_inputs
 
     def preprocess_supervised_dataset(examples):
         # V1: build inputs with format `X [gMASK] <sop> Y <eop>` and labels with format `[IGNORE] ... [IGNORE] Y <eop>`
@@ -556,8 +596,7 @@ def preprocess_data(
         print("inputs:\n{}".format(tokenizer.decode(example["input_ids"])))
 
     if stage == "sft":
-        preprocess_function = preprocess_evaluation_dataset \
-            if training_args.predict_with_generate else preprocess_supervised_dataset
+        preprocess_function = preprocess_squad_dataset
     elif stage == "rm":
         preprocess_function = preprocess_pairwise_dataset
     elif stage == "ppo":
@@ -579,5 +618,88 @@ def preprocess_data(
             print_pairwise_dataset_example(dataset[0])
         elif stage == "ppo":
             print_ppo_dataset_example(dataset[0])
+
+        return dataset
+
+
+def preprocess_squad_data(
+        dataset: Dataset,
+        tokenizer: PreTrainedTokenizer,
+        data_args: DataTrainingArguments,
+        training_args: Seq2SeqTrainingArguments,
+        stage: Literal["ki", "qg"]
+) -> Dataset:
+
+    prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
+    prefix = "Please guess what the question should be based on the context passage and answer I give you, the context and the answer are seperated by / .\n"
+
+    def format_example_squad_question_generation(examples):
+        for i in range(len(examples["context"])):
+            context, question, answer = examples["context"][i], examples["question"][i], examples["answers"][i]
+            if len(answer) == 0:
+                answer = {"text": "I couldn't answer this question based on given context. Please give me further information"}
+            answer_text = "".join(answer["text"])
+            context = prefix + context
+            yield context, question, answer_text
+    
+    def format_example_squad_keywords_indentification(examples):
+        '''
+        For task Keywords Indentification, we only need distinct context passage of original squad dataset
+        '''
+        context = examples["prompt"]
+        distinct_group = set(context)
+        distinct_group = list(distinct_group)
+        for group in distinct_group:
+            yield group
+
+    def preprocess_squad_dataset_qg(examples):
+        '''
+        1st task: Keywords Indentification
+                  Randomly maskout some tokens in context and then ask the model to re-comlete the whole passage
+        2nd task: Question Generation
+                  Ask the model to generate questions based on answers
+        '''
+        model_inputs = {"input_ids": [], "labels": []}
+        for context, question, answer in format_example_squad_question_generation(examples):
+            source_ids = tokenizer.encode(text=context+"/"+answer, add_special_tokens=False)
+            target_ids = tokenizer.encode(text=question, add_special_tokens=False)
+
+            if len(source_ids) > data_args.max_source_length - 2: # gmask and bos tokens
+                source_ids = source_ids[:data_args.max_source_length - 2]
+            if len(target_ids) > data_args.max_target_length - 1: # eos token
+                target_ids = target_ids[:data_args.max_target_length - 1]
+
+            input_ids = tokenizer.build_inputs_with_special_tokens(source_ids, target_ids)
+
+            context_length = input_ids.index(tokenizer.bos_token_id) + 1
+            labels = [IGNORE_INDEX] * context_length + input_ids[context_length:]
+
+            model_inputs["input_ids"].append(input_ids)
+            model_inputs["labels"].append(labels)
+        return model_inputs
+    
+    def print_sft_dataset_example(example):
+        print("input_ids:\n{}".format(example["input_ids"]))
+        print("inputs:\n{}".format(tokenizer.decode(example["input_ids"])))
+        print("label_ids:\n{}".format(example["labels"]))
+        print("labels:\n{}".format(
+            tokenizer.decode([d if d != IGNORE_INDEX else tokenizer.pad_token_id for d in example["labels"]]))
+        )
+
+    if stage == "qg":
+        preprocess_function = preprocess_squad_dataset_qg
+   
+    with training_args.main_process_first(desc="dataset map pre-processing"):
+        dataset = dataset.map(
+            preprocess_function,
+            batched=True,
+            num_proc=data_args.preprocessing_num_workers,
+            remove_columns=dataset.column_names,
+            load_from_cache_file=not data_args.overwrite_cache,
+            desc="Running tokenizer on dataset"
+        )
+
+        if stage == "qg":
+            print_sft_dataset_example(dataset[0])
 
         return dataset

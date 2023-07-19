@@ -3,7 +3,8 @@ from .common import (
     prepare_args,
     prepare_infer_args,
     prepare_data,
-    preprocess_data
+    preprocess_data,
+    preprocess_squad_data
 )
 
 from .data_collator import DataCollatorForChatGLM

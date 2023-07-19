@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Literal, Optional
 from dataclasses import asdict, dataclass, field
 
 
-CHATGLM_REPO_NAME = "THUDM/chatglm-6b"
+CHATGLM_REPO_NAME = "/home/algroup/fhb/ActiveLLM/models/chatglm-6b"
 
 
 @dataclass
@@ -224,7 +224,7 @@ class FinetuningArguments:
         metadata={"help": "Whether to add a project layer for the prefix in P-tuning V2 or not."}
     )
     lora_rank: Optional[int] = field(
-        default=8,
+        default=10,
         metadata={"help": "The intrinsic dimension for LoRA fine-tuning."}
     )
     lora_alpha: Optional[float] = field(

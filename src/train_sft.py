@@ -1,7 +1,7 @@
 # coding=utf-8
 # Implements several parameter-efficient supervised fine-tuning method for ChatGLM.
 # This code is inspired by https://github.com/THUDM/ChatGLM-6B/blob/main/ptuning/main.py
-
+import datasets
 
 from utils import (
     DataCollatorForChatGLM,
@@ -12,6 +12,7 @@ from utils import (
     prepare_args,
     prepare_data,
     preprocess_data,
+    preprocess_squad_data,
     get_logits_processor,
     plot_loss
 )
@@ -21,9 +22,19 @@ def main():
 
     # Prepare pretrained model and dataset
     model_args, data_args, training_args, finetuning_args = prepare_args(stage="sft")
-    dataset = prepare_data(model_args, data_args)
+    file_path = "/home/algroup/fhb/ActiveLLM/ChatGLM-Efficient-Tuning-main/data/squad/squad_v2.py"
+    data_files = {"train": "squad_train-v2.0.json", "dev": "squad_train-v2.0.json"}
+    raw_dataset = datasets.load_dataset(file_path, data_files=data_files)
+    print(raw_dataset)
+    # training_set, dev_set = prepare_data(model_args, data_args)
+    training_set = raw_dataset["train"]
+    dev_set = raw_dataset["validation"]
+
     model, tokenizer = load_pretrained(model_args, finetuning_args, training_args.do_train, stage="sft")
-    dataset = preprocess_data(dataset, tokenizer, data_args, training_args, stage="sft")
+
+    training_set = preprocess_squad_data(training_set, tokenizer, data_args, training_args, stage="qg")
+    dev_set = preprocess_squad_data(dev_set, tokenizer, data_args, training_args, stage="qg")
+
     data_collator = DataCollatorForChatGLM(tokenizer, model, data_args.ignore_pad_token_for_loss, use_v2=model_args.use_v2)
 
     # Override the decoding parameters of Seq2SeqTrainer
@@ -34,13 +45,9 @@ def main():
 
     # Split the dataset
     if training_args.do_train:
-        if data_args.dev_ratio > 1e-6:
-            dataset = dataset.train_test_split(test_size=data_args.dev_ratio)
-            trainer_kwargs = {"train_dataset": dataset["train"], "eval_dataset": dataset["test"]}
-        else:
-            trainer_kwargs = {"train_dataset": dataset}
+        trainer_kwargs = {"train_dataset": training_set, "eval_dataset": dev_set}
     else: # do_eval or do_predict
-        trainer_kwargs = {"eval_dataset": dataset}
+        trainer_kwargs = {"eval_dataset": dev_set}
 
     # Initialize our Trainer
     trainer = Seq2SeqTrainerForChatGLM(
